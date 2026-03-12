@@ -1,0 +1,6 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Windows alternate data stream metadata files
+*:Zone.Identifier

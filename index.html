@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Cytoscape HTML Tables</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.26.0/cytoscape.min.js"></script>
+    <script src="https://unpkg.com/cytoscape-node-html-label/dist/cytoscape-node-html-label.min.js"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <!-- Left Sidebar: List of Items -->
+    <aside>
+        <h3>Items</h3>
+        <ul id="itemList">
+            <!-- Items will be populated by JavaScript -->
+        </ul>
+    </aside>
+
+    <!-- Main Content: Canvas/Graph -->
+    <main>
+        <div id="toolbar">
+            <button id="connectionModeBtn">Connect Nodes (off)</button>
+        </div>
+        <div id="cy"></div>
+    </main>
+
+    <!-- Bottom Bar with Three Panels -->
+    <footer id="bottomBar">
+        <div id="bottomPanels">
+            <div id="panel1" class="bottom-panel">
+                <h4>Node Parameters</h4>
+                <!-- title and editable display name -->
+                <div id="parametersHeader" class="panel-header">
+                    <span id="parametersTitle" style="font-weight:bold;">No operation</span>
+                    <input id="displayNameInput" type="text" placeholder="Display name"
+                        style="margin-left:10px; flex:1;" />
+                </div>
+                <div id="parametersContainer" class="panel-content">
+                    <p style="color: #999; font-size: 12px;">No node selected</p>
+                </div>
+            </div>
+            <div id="panel2" class="bottom-panel">
+                <h4>Panel 2</h4>
+                <div class="panel-content">
+                    <!-- Empty for now -->
+                </div>
+            </div>
+            <div id="panel3" class="bottom-panel">
+                <h4>Panel 3</h4>
+                <div class="panel-content">
+                    <!-- Empty for now -->
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Modal dialog for parameter selection -->
+    <div id="paramDialog" class="modal" style="display:none;">
+        <div class="modal-content">
+            <span id="modalClose" class="modal-close">&times;</span>
+            <div id="modalBody"></div>
+        </div>
+    </div>
+
+    <script>
+        // Global JSON string representing the graph state (nodes & connections)
+        let workflow_id = -1;
+        let graphJson = null; // Will be initialized once workflow_id is set from server
+        let workflowInitialized = false; // Flag to prevent re-initialization
+
+        // Fetch and initialize workflow_id from server
+        async function initializeWorkflow() {
+            try {
+                const response = await fetch('/api/workflow-id');
+                const data = await response.json();
+
+                if (data.workflow_id !== undefined) {
+                    workflow_id = data.workflow_id;
+                    // Initialize graphJson now that we have the real workflow_id
+                    graphJson = JSON.stringify({ workflow_id: workflow_id, mnodes: [], connections: [] });
+                    workflowInitialized = true;
+                    console.log('Workflow initialized with ID:', workflow_id);
+                }
+            } catch (error) {
+                console.error('Error initializing workflow:', error);
+                // Fallback: initialize with default -1
+                graphJson = JSON.stringify({ workflow_id: workflow_id, mnodes: [], connections: [] });
+                workflowInitialized = true;
+            }
+        }
+
+        // Send graph state to server
+        async function sendGraphToServer(action) {
+            if (!workflowInitialized || !graphJson) {
+                initializeWorkflow()
+                return;
+            }
+            try {
+                const response = await fetch('/api/graph', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...JSON.parse(graphJson), action })
+                });
+                const data = await response.json();
+                console.log('Graph sent to server:', data);
+            } catch (error) {
+                console.error('Error sending graph to server:', error);
+            }
+        }
+
+        // Utility for updating the global JSON string from an object
+        function updateGraphJson(obj, action) {
+            if (!workflowInitialized) {
+                console.warn('Cannot update graph: workflow not yet initialized');
+                return;
+            }
+            graphJson = JSON.stringify(obj);
+            sendGraphToServer(action);
+        }
+
+        // Add a node by its id (if not already present)
+        function addNodeToGraph(operationid) {
+            const obj = JSON.parse(graphJson);
+            if (!obj.mnodes.find(n => n.id === operationid)) {
+                obj.mnodes.push({ workflow_id: workflow_id, id: operationid });
+                updateGraphJson(obj, "addnode");
+                console.log('Node added to graphJson:', operationid);
+            }
+        }
+
+        // Remove a node and any related connections
+        function removeNodeFromGraph(id) {
+            const obj = JSON.parse(graphJson);
+            obj.mnodes = obj.mnodes.filter(n => n.id !== id);
+            obj.connections = obj.connections.filter(c => c.source !== id && c.target !== id);
+            updateGraphJson(obj, "removenode");
+            console.log('Node removed from graphJson:', id);
+        }
+
+        // Add a connection defined by source node, target node and parameter index
+        function addConnectionToGraph(sourceId, targetId, paramIndex) {
+            const obj = JSON.parse(graphJson);
+            obj.connections.push({ workflow_id: workflow_id, source: sourceId, target: targetId, paramIndex: paramIndex });
+            updateGraphJson(obj, "addconnection");
+            console.log('Connection added to graphJson:', sourceId, '->', targetId, 'param', paramIndex);
+        }
+
+        // Remove a connection by matching source, target and parameter index
+        function removeConnectionFromGraph(sourceId, targetId, paramIndex) {
+            const obj = JSON.parse(graphJson);
+            obj.connections = obj.connections.filter(c => !(c.source === sourceId && c.target === targetId && c.paramIndex === paramIndex));
+            updateGraphJson(obj, "removeconnection");
+            console.log('Connection removed from graphJson:', sourceId, '->', targetId, 'param', paramIndex);
+        }
+
+        // Load sidebar items from server
+        async function loadSidebarItems() {
+            try {
+                const response = await fetch('/api/sidebar');
+                const data = await response.json();
+                const itemList = document.getElementById('itemList');
+                itemList.innerHTML = '';
+
+                data.items.forEach(item => {
+                    const li = document.createElement('li');
+                    li.textContent = item;
+                    li.draggable = true;
+                    itemList.appendChild(li);
+                });
+
+                // Re-attach drag event listeners after items are loaded
+                attachDragListeners();
+            } catch (error) {
+                console.error('Error loading sidebar items:', error);
+            }
+        }
+
+        // Drag & Drop handlers
+        const canvas = document.getElementById('cy');
+        // Use a consistent name for the Cytoscape container used elsewhere
+        const cyContainer = canvas;
+        let draggedItem = null;
+
+        function attachDragListeners() {
+            const itemList = document.getElementById('itemList');
+
+            // Remove old listeners by cloning
+            const newItemList = itemList.cloneNode(false);
+            newItemList.innerHTML = itemList.innerHTML;
+            itemList.parentNode.replaceChild(newItemList, itemList);
+
+            // Add drag event listeners to items
+            newItemList.addEventListener('dragstart', (e) => {
+                if (e.target.tagName === 'LI') {
+                    draggedItem = e.target.textContent;
+                    e.target.classList.add('dragging');
+                    e.dataTransfer.effectAllowed = 'copy';
+                    e.dataTransfer.setData('text/plain', draggedItem);
+                }
+            });
+
+            newItemList.addEventListener('dragend', (e) => {
+                if (e.target.tagName === 'LI') {
+                    e.target.classList.remove('dragging');
+                    draggedItem = null;
+                }
+            });
+        }
+
+        // Load sidebar items when page loads
+        document.addEventListener('DOMContentLoaded', async function () {
+            // Initialize workflow_id first before doing anything else
+            await initializeWorkflow();
+            // Then load sidebar items
+            loadSidebarItems();
+        });
+
+
+
+        // Canvas drop zone handlers
+        canvas.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+            canvas.classList.add('dragover');
+        });
+
+        canvas.addEventListener('dragleave', (e) => {
+            if (e.target === canvas) {
+                canvas.classList.remove('dragover');
+            }
+        });
+
+        canvas.addEventListener('drop', (e) => {
+            e.preventDefault();
+            canvas.classList.remove('dragover');
+
+            const item = e.dataTransfer.getData('text/plain');
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            // Send drop event to server
+            fetch('/api/drop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    item: item,
+                    position: { x: x, y: y }
+                })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Drop event processed:', data);
+
+                    // Add the new node to the Cytoscape graph
+                    if (data.node) {
+                        const added = cy.add({
+                            data: {
+                                id: data.node.id,
+                                name: data.node.name,
+                                //cpu: data.node.cpu,
+                                //ram: data.node.ram,
+                                type: data.node.type,
+                                tableHtml: data.node.tableHtml,
+                                parameters: data.node.parameters  // Include parameters in the node data
+                            },
+                            position: {
+                                x: data.node.x,
+                                y: data.node.y
+                            }
+                        });
+
+                        // Ensure the newly added node is grab-able (draggable)
+                        try {
+                            added.grabify();
+                        } catch (err) {
+                            console.warn('Could not grabify added node:', err);
+                        }
+
+                        // Add node to graphJson structure
+                        addNodeToGraph(data.node.id);
+
+                        // Update node dimensions with polling to wait for HTML to render
+                        updateNodeDimensionsWithPolling(data.node.id);
+
+                        // Fit the graph to view after a reasonable delay
+                        setTimeout(() => cy.fit(), 2000);
+
+
+                    }
+                })
+                .catch(error => console.error('Drop error:', error));
+        });
+
+        var cy = cytoscape({
+            container: document.getElementById('cy'),
+            elements: [],
+            style: [
+                {
+                    selector: 'node',
+                    style: {
+                        'width': 90,
+                        'height': 60,
+                        'shape': 'rectangle',
+                        'background-opacity': 0,
+                        'border-width': 1,
+                        'border-color': '#cccccc'
+                    }
+                },
+                {
+                    selector: 'node:selected',
+                    style: {
+                        'overlay-color': '#cccccc',
+                        'overlay-opacity': 0.3,
+                        'overlay-padding': 5
+                    }
+                },
+                {
+                    selector: 'edge',
+                    style: {
+                        'curve-style': 'bezier',
+                        'target-arrow-shape': 'triangle',
+                        'target-arrow-color': '#333',
+                        'line-color': '#666',
+                        'width': 2,
+                        'source-distance-from-node': '5px',
+                        'target-distance-from-node': '15px',
+                        'arrow-scale': 1.5
+                    }
+                }
+            ],
+            layout: { name: 'breadthfirst', padding: 1 }
+        });
+
+        // Initialize the HTML Label extension
+        cy.nodeHtmlLabel([
+            {
+                query: 'node', // Apply to all nodes
+                halign: 'center',
+                valign: 'center',
+                halignBox: 'center',
+                valignBox: 'center',
+                tpl: function (data) {
+                    // Use server-generated table HTML
+                    if (data.type === 'operation' && data.tableHtml) {
+                        return `<div class="node-wrapper" data-node-id="${data.id}">${data.tableHtml}</div>`;
+                    } else if (data.type === 'operation') {
+                        // Fallback for nodes without pre-generated HTML (initial nodes)
+                        return `<div class="node-wrapper" data-node-id="${data.id}">
+                            <table class="node-table">
+                                <tr class="header"><td colspan="2">${data.name}</td></tr>
+                                <tr><td>CPU</td><td>${data.cpu}</td></tr>
+                                <tr><td>RAM</td><td>${data.ram}</td></tr>
+                            </table>
+                        </div>`;
+                    }
+                }
+            }
+        ]);
+
+        // Function to update node dimensions based on table size with polling
+        function updateNodeDimensionsWithPolling(nodeId, maxAttempts = 20, interval = 100) {
+            const node = cy.$(`#${nodeId}`);
+            const wrapper = cyContainer.querySelector(`[data-node-id="${nodeId}"]`);
+
+            if (!wrapper || node.length === 0) {
+                console.warn(`Node ${nodeId} not found`);
+                return;
+            }
+
+            let attempts = 0;
+
+            function poll() {
+                attempts++;
+                const table = wrapper.querySelector('.node-table');
+
+                if (table) {
+                    const width = table.offsetWidth;
+                    const height = table.offsetHeight;
+
+                    console.log(`Attempt ${attempts}: Table dimensions - width: ${width}, height: ${height}`);
+
+                    // If we have valid dimensions, update the node
+                    if (width > 0 && height > 0) {
+                        node.style({
+                            'width': width + 10,
+                            'height': height + 10
+                        });
+                        console.log(`Successfully updated node ${nodeId} to ${width + 10}x${height + 10}`);
+                        return;
+                    }
+                }
+
+                // Keep polling until we get valid dimensions or hit max attempts
+                if (attempts < maxAttempts) {
+                    setTimeout(poll, interval);
+                } else {
+                    console.warn(`Failed to get valid dimensions for node ${nodeId} after ${maxAttempts} attempts`);
+                }
+            }
+
+            // Start polling
+            poll();
+        }
+
+        // Watch for changes to the canvas and update node sizes
+        const resizeObserver = new ResizeObserver(() => {
+            cy.nodes().forEach(node => {
+                updateNodeDimensionsWithPolling(node.id());
+            });
+        });
+        // modal close button handler
+        document.addEventListener('DOMContentLoaded', () => {
+            const closeBtn = document.getElementById('modalClose');
+            if (closeBtn) {
+                closeBtn.addEventListener('click', closeModal);
+            }
+            // also close when clicking outside content
+            const modal = document.getElementById('paramDialog');
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) closeModal();
+            });
+        });
+        resizeObserver.observe(cyContainer);
+
+        // Update dimensions after nodes are rendered
+        cy.on('add', 'node', function (evt) {
+            updateNodeDimensionsWithPolling(evt.target.id());
+        });
+
+        // Connection drawing logic using Cytoscape events
+        let selectedNode = null;
+        let connectionMode = false;
+        const connectionModeBtn = document.getElementById('connectionModeBtn');
+
+        // Function to display node parameters in the bottom panel
+        // helper to map datatype to icon HTML, similar to backend get_icon
+
+        // show selection form for connection endpoint in a modal dialog
+        function showConnectionForm(edge) {
+            const modal = document.getElementById('paramDialog');
+            const body = document.getElementById('modalBody');
+            body.innerHTML = '';
+            const sourceId = edge.data('source');
+            const targetId = edge.data('target');
+            const targetNode = cy.$(`#${targetId}`);
+            if (!targetNode || targetNode.length === 0) {
+                body.textContent = 'Target node not found';
+            } else {
+                const params = targetNode.data('parameters') || {};
+                const form = document.createElement('form');
+                form.innerHTML = `<h3>${targetNode.data('name') || targetId}</h3><p style="margin-bottom:10px;">Select parameter:</p>`;
+                const paramEntries = Object.entries(params).filter(([key, param]) => param && param.UIname);
+                paramEntries.forEach(([key, param], index) => {
+                    const label = document.createElement('label');
+                    label.style.display = 'block';
+                    const radio = document.createElement('input');
+                    radio.type = 'radio';
+                    radio.name = 'paramSelect';
+                    radio.value = index.toString();
+                    label.appendChild(radio);
+                    label.appendChild(document.createTextNode(' ' + (param.UIname || key)));
+                    form.appendChild(label);
+                });
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.textContent = 'Confirm';
+                btn.addEventListener('click', () => {
+                    const sel = form.querySelector('input[name="paramSelect"]:checked');
+                    if (sel) {
+                        const paramIndex = parseInt(sel.value);
+                        addConnectionToGraph(sourceId, targetId, paramIndex);
+                    }
+                    closeModal();
+                });
+                form.appendChild(btn);
+                body.appendChild(form);
+            }
+            modal.style.display = 'flex';
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('paramDialog');
+            modal.style.display = 'none';
+        }
+
+        function getIconHtml(datatype) {
+            const icons = {
+                'numericdomain': 'numericdomain.png',
+                'textdomain': 'textdomain.png',
+                'rastercoverage': 'raster.png',
+                'vector': 'vector.png',
+                'table': 'table.png',
+                'georeferece': 'georeference.png',
+                'coordinatesystem': 'coordinatesystem.png',
+                'string': 'text.png',
+                'int64': 'numbers20.png',
+                'unknown': 'choice.png',
+                'itemdomain': 'itemdomain.png',
+                'operation': 'operation.png',
+                'ellipsoid': 'ellipsoid.png',
+                'projection': 'projection.png',
+                'point': 'vector_point.png',
+                'line': 'vector_line.png',
+                'polygon': 'vector_fill.png',
+                'colordomain': 'colordom.png',
+                'text': 'text.png'
+            };
+
+            if (!datatype || datatype === '?') return '';
+            if (datatype.includes('|')) {
+                const parts = datatype.split('|').map(t => t.trim()).filter(t => t && t !== '?');
+                return parts.map(t => `<img src="/images/${icons[t] || icons['unknown']}" style="width:16px;height:16px;margin-right:2px;"/>`).join('');
+            }
+            return `<img src="/images/${icons[datatype] || icons['unknown']}" style="width:16px;height:16px;"/>`;
+        }
+
+        function displayNodeParameters(node) {
+            const parametersContainer = document.getElementById('parametersContainer');
+            const titleElem = document.getElementById('parametersTitle');
+            const displayInput = document.getElementById('displayNameInput');
+            const nodeId = node.id();
+            const nodeData = node.data();
+
+            // set title and input
+            titleElem.textContent = nodeData.name || nodeId;
+            displayInput.value = nodeData.name || '';
+
+            if (!nodeData.parameters || Object.keys(nodeData.parameters).length === 0) {
+                parametersContainer.innerHTML = '<p style="color: #999; font-size: 12px;">No parameters available</p>';
+                return;
+            }
+
+            let html = '<table style="width: 100%; border-collapse: collapse; font-size: 12px;">';
+            html += '<tr style="background: #f5f5f5; border-bottom: 1px solid #ddd;"><th style="padding: 5px; text-align: left; font-weight: bold;">Name</th><th style="padding: 5px; text-align: left; font-weight: bold;">Type</th><th style="padding: 5px; text-align: left; font-weight: bold;">Display&nbsp;Name</th></tr>';
+
+            for (const [key, param] of Object.entries(nodeData.parameters)) {
+                if (typeof param === 'object' && param.UIname) {
+                    const uiName = param.UIname || key;
+                    const paramType = param.type || '?';
+                    const iconHtml = getIconHtml(paramType);
+                    html += `<tr style="border-bottom: 1px solid #eee;">
+                        <td style="padding: 5px;">${uiName}</td>
+                        <td style="padding: 5px;">${iconHtml}</td>
+                        <td style="padding: 5px;"><input type="text" class="param-display-name" value="" placeholder="Display name" style="width:100%;" /></td>
+                    </tr>`;
+                }
+            }
+            html += '</table>';
+            // add set button below table
+            html += '<button class="set-button">Set</button>';
+            parametersContainer.innerHTML = html;
+        }
+
+        // Toggle connection mode
+        connectionModeBtn.addEventListener('click', function () {
+            connectionMode = !connectionMode;
+            connectionModeBtn.textContent = connectionMode ? 'Connect Nodes (on)' : 'Connect Nodes (off)';
+            connectionModeBtn.classList.toggle('active');
+
+            // When in connection mode, disable node dragging; otherwise enable dragging
+            if (connectionMode) {
+                cy.nodes().ungrabify();
+            } else {
+                cy.nodes().grabify();
+            }
+
+            if (!connectionMode && selectedNode) {
+                // Clear selection when exiting connection mode
+                selectedNode.style('background-color', '');
+                selectedNode = null;
+            }
+        });
+
+        // Use Cytoscape's tap event for node clicks - works with HTML labels
+        cy.on('tap', 'node', function (evt) {
+            const node = evt.target;
+
+            // Always display parameters when any node is selected
+            displayNodeParameters(node);
+
+            if (!connectionMode) return; // Only handle connection logic in connection mode
+
+            if (selectedNode === null) {
+                // First click - select source node with green border
+                selectedNode = node;
+                node.style({
+                    'border-width': 3,
+                    'border-color': '#00AA00'
+                });
+                console.log('Source node selected:', node.id());
+            } else if (selectedNode === node) {
+                // Clicking same node - deselect
+                node.style({
+                    'border-width': 0,
+                    'border-color': ''
+                });
+                selectedNode = null;
+                console.log('Selection cleared');
+            } else {
+                // Second click - connect to target node
+                const sourceNode = selectedNode;
+                const targetNode = node;
+                const sourceId = sourceNode.id();
+                const targetId = targetNode.id();
+
+                // Show red border briefly on target node
+                targetNode.style({
+                    'border-width': 3,
+                    'border-color': '#FF0000'
+                });
+
+                // Create a unique edge ID
+                const edgeId = `edge_${sourceId}_${targetId}_${Date.now()}`;
+
+                // Add the edge to the graph
+                const newEdge = cy.add({
+                    data: {
+                        id: edgeId,
+                        source: sourceId,
+                        target: targetId
+                    }
+                });
+
+                console.log('Connection created:', sourceId, '->', targetId);
+
+                // show parameter selection form for target node
+                showConnectionForm(newEdge);
+
+                // Revert borders to normal after 500ms
+                setTimeout(function () {
+                    sourceNode.style({
+                        'border-width': 0,
+                        'border-color': ''
+                    });
+                    targetNode.style({
+                        'border-width': 0,
+                        'border-color': ''
+                    });
+                }, 500);
+
+                selectedNode = null;
+            }
+        });
+
+        // Also handle clicks on HTML label wrappers for connection mode
+        cyContainer.addEventListener('click', function (e) {
+            const wrapper = e.target.closest('.node-wrapper');
+            if (!wrapper) return;
+
+            const nodeId = wrapper.dataset.nodeId;
+            const node = cy.$(`#${nodeId}`);
+            if (!node || node.length === 0) return;
+
+            // Always display parameters when any node is clicked
+            displayNodeParameters(node);
+
+            if (!connectionMode) return;
+
+            if (selectedNode === null) {
+                // Select source node
+                selectedNode = node;
+                node.style({
+                    'border-width': 3,
+                    'border-color': '#00AA00'
+                });
+                wrapper.classList.add('selected');
+            } else if (selectedNode === node) {
+                // Deselect
+                node.style({
+                    'border-width': 0,
+                    'border-color': ''
+                });
+                wrapper.classList.remove('selected');
+                selectedNode = null;
+            } else {
+                // Connect from selectedNode to this node
+                const sourceNode = selectedNode;
+                const targetNode = node;
+                const sourceId = sourceNode.id();
+                const targetId = targetNode.id();
+
+                wrapper.classList.add('targeted');
+                targetNode.style({
+                    'border-width': 3,
+                    'border-color': '#FF0000'
+                });
+
+                const edgeId = `edge_${sourceId}_${targetId}_${Date.now()}`;
+
+                const newEdge = cy.add({
+                    data: {
+                        id: edgeId,
+                        source: sourceId,
+                        target: targetId
+                    }
+                });
+
+                // show parameter selection for the target node
+                showConnectionForm(newEdge);
+
+                // revert visuals after a short delay
+                setTimeout(function () {
+                    sourceNode.style({
+                        'border-width': 0,
+                        'border-color': ''
+                    });
+                    const prevWrapper = cyContainer.querySelector(`[data-node-id="${sourceId}"]`);
+                    if (prevWrapper) prevWrapper.classList.remove('selected');
+                    targetNode.style({
+                        'border-width': 0,
+                        'border-color': ''
+                    });
+                    wrapper.classList.remove('targeted');
+                }, 500);
+
+                selectedNode = null;
+            } // end else
+        });
+
+        // Implement custom drag for HTML-labeled nodes so dragging moves the node (not the canvas)
+        let draggingHtmlNode = null;
+        let dragOffset = null;
+        let dragStarted = false;
+        const DRAG_THRESHOLD = 4; // pixels
+
+        function screenToModel(screenX, screenY) {
+            const rect = cyContainer.getBoundingClientRect();
+            const relX = screenX - rect.left;
+            const relY = screenY - rect.top;
+            const pan = cy.pan();
+            const zoom = cy.zoom();
+            return { x: (relX - pan.x) / zoom, y: (relY - pan.y) / zoom };
+        }
+
+        cyContainer.addEventListener('mousedown', function (e) {
+            const wrapper = e.target.closest('.node-wrapper');
+            if (!wrapper) return;
+            if (connectionMode) return;
+
+            e.preventDefault();
+
+            const nodeId = wrapper.dataset.nodeId;
+            const node = cy.$(`#${nodeId}`);
+            if (!node || node.length === 0) return;
+
+            draggingHtmlNode = node;
+            dragStarted = false;
+
+            const startScreen = { x: e.clientX, y: e.clientY };
+            const startModel = screenToModel(startScreen.x, startScreen.y);
+            const nodePos = node.position();
+            dragOffset = { x: nodePos.x - startModel.x, y: nodePos.y - startModel.y };
+
+            const onMove = function (ev) {
+                if (!draggingHtmlNode) return;
+                const moveScreen = { x: ev.clientX, y: ev.clientY };
+                const dx = moveScreen.x - startScreen.x;
+                const dy = moveScreen.y - startScreen.y;
+
+                if (!dragStarted) {
+                    if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+                    dragStarted = true;
+                    cy.userPanningEnabled(false);
+                }
+
+                const modelPos = screenToModel(moveScreen.x, moveScreen.y);
+                draggingHtmlNode.position({ x: modelPos.x + dragOffset.x, y: modelPos.y + dragOffset.y });
+            };
+
+            const onUp = function () {
+                if (dragStarted) {
+                    cy.userPanningEnabled(true);
+                }
+                draggingHtmlNode = null;
+                dragOffset = null;
+                dragStarted = false;
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            };
+
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+
+        // Touch support: implement touch-based dragging with same offset logic
+        cyContainer.addEventListener('touchstart', function (e) {
+            const touch = e.touches[0];
+            if (!touch) return;
+            const wrapper = e.target.closest('.node-wrapper');
+            if (!wrapper) return;
+            if (connectionMode) return;
+
+            e.preventDefault();
+
+            const nodeId = wrapper.dataset.nodeId;
+            const node = cy.$(`#${nodeId}`);
+            if (!node || node.length === 0) return;
+
+            draggingHtmlNode = node;
+            dragStarted = false;
+
+            const startScreen = { x: touch.clientX, y: touch.clientY };
+            const startModel = screenToModel(startScreen.x, startScreen.y);
+            const nodePos = node.position();
+            dragOffset = { x: nodePos.x - startModel.x, y: nodePos.y - startModel.y };
+
+            const onTouchMove = function (ev) {
+                const t = ev.touches[0];
+                if (!t || !draggingHtmlNode) return;
+                const moveScreen = { x: t.clientX, y: t.clientY };
+                const dx = moveScreen.x - startScreen.x;
+                const dy = moveScreen.y - startScreen.y;
+
+                if (!dragStarted) {
+                    if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+                    dragStarted = true;
+                    cy.userPanningEnabled(false);
+                }
+
+                const modelPos = screenToModel(moveScreen.x, moveScreen.y);
+                draggingHtmlNode.position({ x: modelPos.x + dragOffset.x, y: modelPos.y + dragOffset.y });
+            };
+
+            const onTouchEnd = function () {
+                if (dragStarted) {
+                    cy.userPanningEnabled(true);
+                }
+                draggingHtmlNode = null;
+                dragOffset = null;
+                dragStarted = false;
+                document.removeEventListener('touchmove', onTouchMove);
+                document.removeEventListener('touchend', onTouchEnd);
+            };
+
+            document.addEventListener('touchmove', onTouchMove, { passive: false });
+            document.addEventListener('touchend', onTouchEnd);
+        });
+    </script>
+</body>
+
+</html>
