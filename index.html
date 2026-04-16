@@ -25,6 +25,9 @@
         <div id="cy"></div>
     </main>
 
+    <!-- Resize handle -->
+    <div id="resizeHandle"></div>
+
     <!-- Bottom Bar with Three Panels -->
     <footer id="bottomBar">
         <div id="bottomPanels">
@@ -32,18 +35,17 @@
                 <h4>Node Parameters</h4>
                 <!-- title and editable display name -->
                 <div id="parametersHeader" class="panel-header">
-                    <span id="parametersTitle" style="font-weight:bold;">No operation</span>
-                    <input id="displayNameInput" type="text" placeholder="Display name"
-                        style="margin-left:10px; flex:1;" />
+                    <span id="parametersTitle" class="parameters-title">No operation</span>
+                    <input id="displayNameInput" class="display-name-input" type="text" placeholder="Display name" />
                 </div>
                 <div id="parametersContainer" class="panel-content">
-                    <p style="color: #999; font-size: 12px;">No node selected</p>
+                    <p class="empty-state-text">No node selected</p>
                 </div>
             </div>
             <div id="panel2" class="bottom-panel">
-                <h4>Panel 2</h4>
-                <div class="panel-content">
-                    <!-- Empty for now -->
+                <h4>Metadata Parameters</h4>
+                <div id="metadataParametersContainer" class="panel-content">
+                    <p class="empty-state-text">No metadata available</p>
                 </div>
             </div>
             <div id="panel3" class="bottom-panel">
@@ -56,7 +58,7 @@
     </footer>
 
     <!-- Modal dialog for parameter selection -->
-    <div id="paramDialog" class="modal" style="display:none;">
+    <div id="paramDialog" class="modal">
         <div class="modal-content">
             <span id="modalClose" class="modal-close">&times;</span>
             <div id="modalBody"></div>
@@ -68,6 +70,10 @@
         let workflow_id = -1;
         let graphJson = null; // Will be initialized once workflow_id is set from server
         let workflowInitialized = false; // Flag to prevent re-initialization
+        let metadataParameterValues = {};
+
+        // Dictionary to store item name -> number mappings from sidebar items
+        let itemDictionary = {};
 
         // Fetch and initialize workflow_id from server
         async function initializeWorkflow() {
@@ -93,17 +99,25 @@
         // Send graph state to server
         async function sendGraphToServer(action) {
             if (!workflowInitialized || !graphJson) {
-                initializeWorkflow()
-                return;
+                await initializeWorkflow();
+                if (!workflowInitialized || !graphJson) {
+                    return null;
+                }
             }
             try {
+                console.log('Graph sent to server:', graphJson);
                 const response = await fetch('/api/graph', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ ...JSON.parse(graphJson), action })
                 });
                 const data = await response.json();
-                console.log('Graph sent to server:', data);
+                console.log('Answer received from server', data);
+                metadataParameterValues = data?.parameter_values && typeof data.parameter_values === 'object'
+                    ? data.parameter_values
+                    : {};
+                displayMetadataParameters(data?.metadata?.parameters || null, metadataParameterValues);
+                return data
             } catch (error) {
                 console.error('Error sending graph to server:', error);
             }
@@ -113,37 +127,32 @@
         function updateGraphJson(obj, action) {
             if (!workflowInitialized) {
                 console.warn('Cannot update graph: workflow not yet initialized');
-                return;
+                return null;
             }
             graphJson = JSON.stringify(obj);
-            sendGraphToServer(action);
+            return sendGraphToServer(action);
         }
 
-        // Add a node by its id (if not already present)
-        function addNodeToGraph(operationid) {
-            const obj = JSON.parse(graphJson);
-            if (!obj.mnodes.find(n => n.id === operationid)) {
-                obj.mnodes.push({ workflow_id: workflow_id, id: operationid });
-                updateGraphJson(obj, "addnode");
-                console.log('Node added to graphJson:', operationid);
-            }
+        // Add a node by its operation id and return the server-assigned node id
+        async function addNodeToGraph(operationid) {
+            const response = await updateGraphJson({ workflow_id: workflow_id, id: operationid }, "addnode");
+
+            let resolvedNodeId = String(response.node_id);
+            console.log('Node added to graphJson with resolved id:', response);
+            return resolvedNodeId;
         }
 
         // Remove a node and any related connections
         function removeNodeFromGraph(id) {
-            const obj = JSON.parse(graphJson);
-            obj.mnodes = obj.mnodes.filter(n => n.id !== id);
-            obj.connections = obj.connections.filter(c => c.source !== id && c.target !== id);
-            updateGraphJson(obj, "removenode");
+            updateGraphJson({ workflow_id: workflow_id, id: id }, "removenode");
             console.log('Node removed from graphJson:', id);
         }
 
         // Add a connection defined by source node, target node and parameter index
-        function addConnectionToGraph(sourceId, targetId, paramIndex) {
-            const obj = JSON.parse(graphJson);
-            obj.connections.push({ workflow_id: workflow_id, source: sourceId, target: targetId, paramIndex: paramIndex });
-            updateGraphJson(obj, "addconnection");
+        async function addConnectionToGraph(sourceId, targetId, paramIndex) {
+            const response = await updateGraphJson({ workflow_id: workflow_id, source: sourceId, target: targetId, paramOutIndex: 0, paramInIndex: paramIndex, }, "addconnection");
             console.log('Connection added to graphJson:', sourceId, '->', targetId, 'param', paramIndex);
+            return response;
         }
 
         // Remove a connection by matching source, target and parameter index
@@ -161,10 +170,23 @@
                 const data = await response.json();
                 const itemList = document.getElementById('itemList');
                 itemList.innerHTML = '';
+                itemDictionary = {}; // Reset dictionary
 
                 data.items.forEach(item => {
+                    // Parse "name|number" format
+                    const parts = item.split('|');
+                    const name = parts[0].trim();
+                    const number = parts.length > 1 ? parts[1].trim() : '';
+
+                    // Store in dictionary for later lookup
+                    if (name) {
+                        itemDictionary[name] = number;
+                    }
+
                     const li = document.createElement('li');
-                    li.textContent = item;
+                    li.textContent = name; // Display only the name
+                    li.dataset.itemName = name; // Store name for reference
+                    li.dataset.itemNumber = number; // Store number for reference
                     li.draggable = true;
                     itemList.appendChild(li);
                 });
@@ -193,10 +215,15 @@
             // Add drag event listeners to items
             newItemList.addEventListener('dragstart', (e) => {
                 if (e.target.tagName === 'LI') {
-                    draggedItem = e.target.textContent;
+                    draggedItem = e.target.dataset.itemName; // Use parsed name only
                     e.target.classList.add('dragging');
                     e.dataTransfer.effectAllowed = 'copy';
+                    // Set both name and number in data transfer for flexibility
                     e.dataTransfer.setData('text/plain', draggedItem);
+                    e.dataTransfer.setData('application/json', JSON.stringify({
+                        name: e.target.dataset.itemName,
+                        number: e.target.dataset.itemNumber
+                    }));
                 }
             });
 
@@ -235,7 +262,21 @@
             e.preventDefault();
             canvas.classList.remove('dragover');
 
-            const item = e.dataTransfer.getData('text/plain');
+            const droppedJson = e.dataTransfer.getData('application/json');
+            let droppedItem = null;
+
+            if (droppedJson) {
+                try {
+                    droppedItem = JSON.parse(droppedJson);
+                } catch (err) {
+                    console.warn('Could not parse dropped item JSON payload:', err);
+                }
+            }
+
+            const item = droppedItem?.name || e.dataTransfer.getData('text/plain');
+            const itemNumber = droppedItem?.number || '';
+
+            console.log('Drop event processed 2:', { item, itemNumber }, e);
             const rect = canvas.getBoundingClientRect();
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
@@ -246,21 +287,30 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     item: item,
+                    itemNumber: itemNumber,
                     position: { x: x, y: y }
                 })
             })
                 .then(response => response.json())
-                .then(data => {
+                .then(async data => {
                     console.log('Drop event processed:', data);
 
                     // Add the new node to the Cytoscape graph
                     if (data.node) {
+                        let operationid = String(data.node.operation_id);
+
+                        try {
+                            // Request server-side creation first so we can use canonical node id in Cytoscape.
+                            nodeId = await addNodeToGraph(operationid)
+                        } catch (err) {
+                            console.error('Failed to resolve node id from server, using fallback id:', err);
+                        }
+
                         const added = cy.add({
                             data: {
-                                id: data.node.id,
+                                id: nodeId,
+                                operationid: data.node.operation_id,
                                 name: data.node.name,
-                                //cpu: data.node.cpu,
-                                //ram: data.node.ram,
                                 type: data.node.type,
                                 tableHtml: data.node.tableHtml,
                                 parameters: data.node.parameters  // Include parameters in the node data
@@ -278,11 +328,8 @@
                             console.warn('Could not grabify added node:', err);
                         }
 
-                        // Add node to graphJson structure
-                        addNodeToGraph(data.node.id);
-
                         // Update node dimensions with polling to wait for HTML to render
-                        updateNodeDimensionsWithPolling(data.node.id);
+                        updateNodeDimensionsWithPolling(nodeId);
 
                         // Fit the graph to view after a reasonable delay
                         setTimeout(() => cy.fit(), 2000);
@@ -333,6 +380,27 @@
             layout: { name: 'breadthfirst', padding: 1 }
         });
 
+        function getNodeHeaderText(data) {
+            const nodeName = data.name || '';
+            return `${data.id}: ${nodeName}`;
+        }
+
+        function withPrefixedNodeHeader(data) {
+            if (!data.tableHtml) {
+                return '';
+            }
+
+            const wrapper = document.createElement('div');
+            wrapper.innerHTML = data.tableHtml;
+            const headerCell = wrapper.querySelector('tr.header td');
+
+            if (headerCell) {
+                headerCell.textContent = getNodeHeaderText(data);
+            }
+
+            return wrapper.innerHTML;
+        }
+
         // Initialize the HTML Label extension
         cy.nodeHtmlLabel([
             {
@@ -344,12 +412,12 @@
                 tpl: function (data) {
                     // Use server-generated table HTML
                     if (data.type === 'operation' && data.tableHtml) {
-                        return `<div class="node-wrapper" data-node-id="${data.id}">${data.tableHtml}</div>`;
+                        return `<div class="node-wrapper" data-node-id="${data.id}">${withPrefixedNodeHeader(data)}</div>`;
                     } else if (data.type === 'operation') {
                         // Fallback for nodes without pre-generated HTML (initial nodes)
                         return `<div class="node-wrapper" data-node-id="${data.id}">
                             <table class="node-table">
-                                <tr class="header"><td colspan="2">${data.name}</td></tr>
+                                <tr class="header"><td colspan="2">${getNodeHeaderText(data)}</td></tr>
                                 <tr><td>CPU</td><td>${data.cpu}</td></tr>
                                 <tr><td>RAM</td><td>${data.ram}</td></tr>
                             </table>
@@ -444,33 +512,82 @@
             body.innerHTML = '';
             const sourceId = edge.data('source');
             const targetId = edge.data('target');
+            console.log('Showing connection form for edge:', sourceId, '->', targetId);
             const targetNode = cy.$(`#${targetId}`);
+            const sourceNode = cy.$(`#${sourceId}`);
             if (!targetNode || targetNode.length === 0) {
                 body.textContent = 'Target node not found';
             } else {
-                const params = targetNode.data('parameters') || {};
+                const paramsIn = targetNode.data('parameters') || {};
+                const paramsOut = sourceNode.data('parameters') || {};
+
+                // Get the output parameter from source node (where input === 'no')
+                const outputParam = Object.values(paramsOut).find(param => param && param.input === 'no');
+                const outputTypes = outputParam ? outputParam.type.split('|').map(t => t.trim()) : [];
+
+                // Filter to only include input parameters of target node that match the output types
+                const paramEntries = Object.entries(paramsIn).filter(([key, param]) => {
+                    if (!param || !param.name || param.input !== 'yes') {
+                        return false;
+                    }
+                    // Check if parameter type matches any of the output types
+                    const paramTypes = param.type ? param.type.split('|').map(t => t.trim()) : [];
+                    return paramTypes.some(pType => outputTypes.includes(pType));
+                });
+
                 const form = document.createElement('form');
-                form.innerHTML = `<h3>${targetNode.data('name') || targetId}</h3><p style="margin-bottom:10px;">Select parameter:</p>`;
-                const paramEntries = Object.entries(params).filter(([key, param]) => param && param.UIname);
+                form.innerHTML = `
+                    <div class="connection-form-header">Connect to input parameter</div>
+                    <h3>${targetNode.data('name') || targetId}</h3>
+                    <p class="connection-form-subtitle">Select parameter:</p>
+                `;
                 paramEntries.forEach(([key, param], index) => {
                     const label = document.createElement('label');
-                    label.style.display = 'block';
+                    label.className = 'connection-param-option';
                     const radio = document.createElement('input');
                     radio.type = 'radio';
                     radio.name = 'paramSelect';
-                    radio.value = index.toString();
+                    radio.value = String(param.index ?? index);
                     label.appendChild(radio);
-                    label.appendChild(document.createTextNode(' ' + (param.UIname || key)));
+                    label.appendChild(document.createTextNode(' ' + param.index + ": " + (param.name || key)));
                     form.appendChild(label);
                 });
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.textContent = 'Confirm';
-                btn.addEventListener('click', () => {
+                btn.addEventListener('click', async () => {
                     const sel = form.querySelector('input[name="paramSelect"]:checked');
                     if (sel) {
+                        console.log('Selected parameter index:', sel);
                         const paramIndex = parseInt(sel.value);
-                        addConnectionToGraph(sourceId, targetId, paramIndex);
+                        btn.disabled = true;
+                        try {
+                            // Wait for addconnection response so metadata panel refresh happens after server update.
+                            await addConnectionToGraph(sourceId, targetId, paramIndex - 1);
+                            // Update the target node table: 4th column of the connected row shows the source node index
+                            const targetWrapper = cyContainer.querySelector(`[data-node-id="${targetId}"]`);
+                            if (targetWrapper) {
+                                const row = targetWrapper.querySelector(`tr[data-param-index="${paramIndex}"]`);
+                                if (row) {
+                                    const cells = row.querySelectorAll('td');
+                                    if (cells.length >= 4) {
+                                        cells[3].textContent = String(sourceId);
+                                    }
+                                }
+                                // Persist the updated table HTML back into Cytoscape node data
+                                const targetCyNode = cy.$(`#${targetId}`);
+                                if (targetCyNode.length > 0) {
+                                    const updatedTable = targetWrapper.querySelector('table');
+                                    if (updatedTable) {
+                                        targetCyNode.data('tableHtml', updatedTable.outerHTML);
+                                    }
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Failed to add connection:', error);
+                        } finally {
+                            btn.disabled = false;
+                        }
                     }
                     closeModal();
                 });
@@ -485,73 +602,533 @@
             modal.style.display = 'none';
         }
 
+        const defaultIcons = {
+            'numericdomain': 'numericdomain.png',
+            'textdomain': 'textdomain.png',
+            'rastercoverage': 'raster.png',
+            'vector': 'vector.png',
+            'table': 'table.png',
+            'georeferece': 'georeference.png',
+            'coordinatesystem': 'coordinatesystem.png',
+            'string': 'text.png',
+            'int64': 'numbers20.png',
+            'signedbyte': 'numbers20.png',
+            'byte': 'numbers20.png',
+            'uint16': 'numbers20.png',
+            'int16': 'numbers20.png',
+            'uint32': 'numbers20.png',
+            'int32': 'numbers20.png',
+            'uint64': 'numbers20.png',
+            'real32': 'numbers20.png',
+            'real64': 'numbers20.png',
+            'date': 'text.png',
+            'time': 'text.png',
+            'unknown': 'choice.png',
+            'itemdomain': 'itemdomain.png',
+            'operation': 'operation.png',
+            'ellipsoid': 'ellipsoid.png',
+            'projection': 'projection.png',
+            'point': 'vector_point.png',
+            'line': 'vector_line.png',
+            'polygon': 'vector_fill.png',
+            'colordomain': 'colordom.png',
+            'text': 'text.png',
+            'bool': 'bool20.png'
+        };
+
+        let cachedIcons = null;
+        let iconsFetchPromise = null;
+
+        async function ensureIconsLoaded() {
+            if (cachedIcons) {
+                return cachedIcons;
+            }
+            if (iconsFetchPromise) {
+                return iconsFetchPromise;
+            }
+
+            iconsFetchPromise = fetch('/api/icons')
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Failed to load icons: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    cachedIcons = data?.icons && typeof data.icons === 'object' ? data.icons : defaultIcons;
+                    return cachedIcons;
+                })
+                .catch(error => {
+                    console.warn('Using fallback icon mapping, server icon list unavailable.', error);
+                    cachedIcons = defaultIcons;
+                    return cachedIcons;
+                })
+                .finally(() => {
+                    iconsFetchPromise = null;
+                });
+
+            return iconsFetchPromise;
+        }
+
         function getIconHtml(datatype) {
-            const icons = {
-                'numericdomain': 'numericdomain.png',
-                'textdomain': 'textdomain.png',
-                'rastercoverage': 'raster.png',
-                'vector': 'vector.png',
-                'table': 'table.png',
-                'georeferece': 'georeference.png',
-                'coordinatesystem': 'coordinatesystem.png',
-                'string': 'text.png',
-                'int64': 'numbers20.png',
-                'unknown': 'choice.png',
-                'itemdomain': 'itemdomain.png',
-                'operation': 'operation.png',
-                'ellipsoid': 'ellipsoid.png',
-                'projection': 'projection.png',
-                'point': 'vector_point.png',
-                'line': 'vector_line.png',
-                'polygon': 'vector_fill.png',
-                'colordomain': 'colordom.png',
-                'text': 'text.png'
-            };
+            const icons = cachedIcons || defaultIcons;
 
             if (!datatype || datatype === '?') return '';
             if (datatype.includes('|')) {
-                const parts = datatype.split('|').map(t => t.trim()).filter(t => t && t !== '?');
-                return parts.map(t => `<img src="/images/${icons[t] || icons['unknown']}" style="width:16px;height:16px;margin-right:2px;"/>`).join('');
+                parts = datatype.split('|').map(t => t.trim()).filter(t => t && t !== '?');
+                const allValues = Object.values(parts);
+                p1 = allValues.map(t => icons[t]);
+                p2 = [...new Set(p1)];
+                console.log("icons", p2)
+                return p2.map(t => `<img class="datatype-icon datatype-icon-spaced" src="/images/${t || icons['unknown']}"/>`).join('');
             }
-            return `<img src="/images/${icons[datatype] || icons['unknown']}" style="width:16px;height:16px;"/>`;
+            return `<img class="datatype-icon" src="/images/${icons[datatype] || icons['unknown']}"/>`;
         }
 
-        function displayNodeParameters(node) {
+        function getParameterUiName(param, fallbackName) {
+            console.log('Getting UI name for parameter:', param, 'with fallback:', fallbackName);
+            return param?.UIname || param?.UIName || param?.name || fallbackName || 'Unnamed parameter';
+        }
+
+        function normalizeParameterDirection(value) {
+            const normalized = String(value ?? '').trim().toLowerCase();
+
+            if (!normalized) {
+                return 'unknown';
+            }
+
+            if (['yes', 'true', '1', 'in', 'input'].includes(normalized)) {
+                return 'input';
+            }
+
+            if (['no', 'false', '0', 'out', 'output'].includes(normalized)) {
+                return 'output';
+            }
+
+            return 'unknown';
+        }
+
+        function isOutputParameter(param) {
+            return normalizeParameterDirection(param?.input) === 'output';
+        }
+
+        function setMetadataStatus(message, isError = false) {
+            const status = document.getElementById('metadataParametersStatus');
+            if (!status) {
+                return;
+            }
+
+            status.textContent = message || '';
+            status.classList.toggle('error', Boolean(isError));
+        }
+
+        function setNodeStatus(message, isError = false) {
+            const status = document.getElementById('nodeParametersStatus');
+            if (!status) {
+                return;
+            }
+
+            status.textContent = message || '';
+            status.classList.toggle('error', Boolean(isError));
+        }
+
+        function applyNodeParameterDisplayNamesToCanvas(nodeId, savedParameters) {
+            if (!nodeId || !savedParameters || typeof savedParameters !== 'object') {
+                return;
+            }
+
+            const node = cy.$(`#${nodeId}`);
+            if (!node || node.length === 0) {
+                return;
+            }
+
+            const nodeParams = node.data('parameters') || {};
+            const wrapper = cyContainer.querySelector(`[data-node-id="${nodeId}"]`);
+            if (!wrapper) {
+                return;
+            }
+
+            Object.entries(savedParameters).forEach(([key, value]) => {
+                const paramMeta = nodeParams[key];
+                if (!paramMeta || typeof paramMeta !== 'object') {
+                    return;
+                }
+
+                const rowIndex = String(paramMeta.index ?? '');
+                let row = wrapper.querySelector(`tr[data-param-key="${key}"]`);
+                if (!row && rowIndex) {
+                    row = wrapper.querySelector(`tr[data-param-index="${rowIndex}"]`);
+                }
+                if (!row) {
+                    return;
+                }
+
+                const cells = row.querySelectorAll('td');
+                if (cells.length < 4) {
+                    return;
+                }
+
+                const displayName = (value && typeof value === 'object') ? String(value.display_name || '').trim() : '';
+                cells[2].textContent = displayName || getParameterUiName(paramMeta, key);
+
+                const fixedValue = (value && typeof value === 'object') ? String(value.fixed_value || '') : '';
+                if (isOutputParameter(paramMeta)) {
+                    cells[3].textContent = '';
+                } else if (fixedValue !== '') {
+                    cells[3].textContent = fixedValue;
+                } else {
+                    const currentSource = String(cells[3].textContent || '').trim();
+                    if (!currentSource || currentSource === '...') {
+                        cells[3].textContent = '...';
+                    }
+                }
+            });
+
+            const updatedTable = wrapper.querySelector('table');
+            if (updatedTable) {
+                node.data('tableHtml', updatedTable.outerHTML);
+            }
+        }
+
+        function applyNodeDisplayNameToCanvas(nodeId, savedNodeDisplayName) {
+            if (!nodeId) {
+                return;
+            }
+
+            const node = cy.$(`#${nodeId}`);
+            if (!node || node.length === 0) {
+                return;
+            }
+
+            const nextName = String(savedNodeDisplayName || '').trim();
+            if (nextName) {
+                node.data('name', nextName);
+            }
+
+            const wrapper = cyContainer.querySelector(`[data-node-id="${nodeId}"]`);
+            if (!wrapper) {
+                return;
+            }
+
+            const headerCell = wrapper.querySelector('tr.header td');
+            if (headerCell) {
+                headerCell.textContent = getNodeHeaderText({
+                    id: node.id(),
+                    name: node.data('name') || ''
+                });
+            }
+
+            const updatedTable = wrapper.querySelector('table');
+            if (updatedTable) {
+                node.data('tableHtml', updatedTable.outerHTML);
+            }
+        }
+
+        async function saveNodeParameters() {
+            const container = document.getElementById('parametersContainer');
+            const saveButton = document.getElementById('nodeParametersSetButton');
+
+            if (!container || !saveButton) {
+                return;
+            }
+
+            const nodeId = container.dataset.nodeId || '';
+            const nodeDisplayName = document.getElementById('displayNameInput')?.value || '';
+            const values = {};
+
+            const displayInputs = Array.from(container.querySelectorAll('.param-display-name'));
+            displayInputs.forEach((displayInput) => {
+                const key = displayInput.dataset.parameterKey;
+                if (!key) {
+                    return;
+                }
+                const fixedInput = container.querySelector(`.param-fixed-value[data-parameter-key="${key}"]`);
+                values[key] = {
+                    display_name: displayInput.value || '',
+                    fixed_value: fixedInput ? (fixedInput.value || '') : ''
+                };
+            });
+
+            saveButton.disabled = true;
+            setNodeStatus('Saving...');
+
+            try {
+                const response = await fetch('/api/node-parameters', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        workflow_id: workflow_id,
+                        node_id: nodeId,
+                        node_display_name: nodeDisplayName,
+                        parameters: values
+                    })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok || data.status !== 'success') {
+                    throw new Error(data.message || 'Failed to save node parameters');
+                }
+
+                applyNodeDisplayNameToCanvas(nodeId, data?.node_parameters?.node_display_name || nodeDisplayName);
+                applyNodeParameterDisplayNamesToCanvas(nodeId, data?.node_parameters?.parameters || values);
+
+                setNodeStatus('Saved');
+            } catch (error) {
+                console.error('Error saving node parameters:', error);
+                setNodeStatus(error.message || 'Failed to save', true);
+            } finally {
+                saveButton.disabled = false;
+            }
+        }
+
+        async function saveMetadataParameters() {
+            console.log('Saving metadata parameters with current values:', metadataParameterValues);
+            const container = document.getElementById('metadataParametersContainer');
+            const saveButton = document.getElementById('metadataParametersSetButton');
+
+            if (!container || !saveButton) {
+                return;
+            }
+
+            const inputs = Array.from(container.querySelectorAll('.metadata-parameter-input'));
+            const values = {};
+
+            inputs.forEach((input) => {
+                values[input.dataset.parameterKey] = input.value;
+            });
+
+            saveButton.disabled = true;
+            setMetadataStatus('Saving...');
+
+            try {
+                const response = await fetch('/api/metadata-parameters', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        workflow_id: workflow_id,
+                        values: values
+                    })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok || data.status !== 'success') {
+                    throw new Error(data.message || 'Failed to save metadata parameters');
+                }
+
+                metadataParameterValues = data?.parameter_values && typeof data.parameter_values === 'object'
+                    ? data.parameter_values
+                    : values;
+                setMetadataStatus('Saved');
+            } catch (error) {
+                console.error('Error saving metadata parameters:', error);
+                setMetadataStatus(error.message || 'Failed to save', true);
+            } finally {
+                saveButton.disabled = false;
+            }
+        }
+
+        function displayMetadataParameters(parameters, currentValues = {}) {
+            const container = document.getElementById('metadataParametersContainer');
+
+            if (!container) {
+                return;
+            }
+
+            container.innerHTML = '';
+
+            if (!parameters || typeof parameters !== 'object' || Object.keys(parameters).length === 0) {
+                metadataParameterValues = {};
+                container.innerHTML = '<p class="empty-state-text">No metadata available</p>';
+                return;
+            }
+
+            const table = document.createElement('table');
+            table.className = 'parameters-table metadata-parameters-table';
+
+            const thead = document.createElement('thead');
+            thead.innerHTML = '<tr class="parameters-table-header-row"><th class="parameters-table-heading">Name</th><th class="parameters-table-heading">Type</th><th class="parameters-table-heading">Value</th></tr>';
+            table.appendChild(thead);
+
+            const tbody = document.createElement('tbody');
+
+            Object.entries(parameters)
+                .sort(([, leftParam], [, rightParam]) => {
+                    const leftIsOutput = isOutputParameter(leftParam);
+                    const rightIsOutput = isOutputParameter(rightParam);
+
+                    if (leftIsOutput !== rightIsOutput) {
+                        return leftIsOutput ? 1 : -1;
+                    }
+
+                    const leftIndex = Number(leftParam?.index ?? Number.MAX_SAFE_INTEGER);
+                    const rightIndex = Number(rightParam?.index ?? Number.MAX_SAFE_INTEGER);
+                    return leftIndex - rightIndex;
+                })
+                .forEach(([key, param]) => {
+                    if (!param || typeof param !== 'object') {
+                        return;
+                    }
+
+                    const row = document.createElement('tr');
+                    row.className = 'parameters-table-row';
+                    if (isOutputParameter(param)) {
+                        row.classList.add('metadata-output-row');
+                    }
+
+                    const nameCell = document.createElement('td');
+                    nameCell.className = 'parameters-table-cell';
+                    nameCell.textContent = getParameterUiName(param, key);
+
+                    const typeCell = document.createElement('td');
+                    typeCell.className = 'parameters-table-cell metadata-parameter-type-cell';
+                    const paramType = param.type || '?';
+                    typeCell.innerHTML = getIconHtml(paramType);
+
+                    const valueCell = document.createElement('td');
+                    valueCell.className = 'parameters-table-cell';
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.className = 'param-display-name metadata-parameter-input';
+                    input.placeholder = 'Enter value';
+                    input.value = currentValues[key] || '';
+                    input.dataset.parameterKey = key;
+                    input.dataset.parameterIndex = String(param.index ?? '');
+                    input.dataset.parameterInput = String(param.input ?? '');
+                    valueCell.appendChild(input);
+
+                    row.appendChild(nameCell);
+                    row.appendChild(typeCell);
+                    row.appendChild(valueCell);
+                    tbody.appendChild(row);
+                });
+
+            if (tbody.children.length === 0) {
+                container.innerHTML = '<p class="empty-state-text">No metadata available</p>';
+                return;
+            }
+
+            table.appendChild(tbody);
+            container.appendChild(table);
+
+            const actions = document.createElement('div');
+            actions.className = 'metadata-parameters-actions';
+
+            const status = document.createElement('span');
+            status.id = 'metadataParametersStatus';
+            status.className = 'metadata-parameters-status';
+
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.id = 'metadataParametersSetButton';
+            button.className = 'set-button';
+            button.textContent = 'Set';
+            button.addEventListener('click', saveMetadataParameters);
+
+            actions.appendChild(status);
+            actions.appendChild(button);
+            container.appendChild(actions);
+        }
+
+        async function displayNodeParameters(node) {
+            await ensureIconsLoaded();
             const parametersContainer = document.getElementById('parametersContainer');
             const titleElem = document.getElementById('parametersTitle');
             const displayInput = document.getElementById('displayNameInput');
             const nodeId = node.id();
             const nodeData = node.data();
 
+            parametersContainer.dataset.nodeId = nodeId;
+
             // set title and input
             titleElem.textContent = nodeData.name || nodeId;
             displayInput.value = nodeData.name || '';
 
             if (!nodeData.parameters || Object.keys(nodeData.parameters).length === 0) {
-                parametersContainer.innerHTML = '<p style="color: #999; font-size: 12px;">No parameters available</p>';
+                parametersContainer.innerHTML = '<p class="empty-state-text">No parameters available</p>';
                 return;
             }
 
-            let html = '<table style="width: 100%; border-collapse: collapse; font-size: 12px;">';
-            html += '<tr style="background: #f5f5f5; border-bottom: 1px solid #ddd;"><th style="padding: 5px; text-align: left; font-weight: bold;">Name</th><th style="padding: 5px; text-align: left; font-weight: bold;">Type</th><th style="padding: 5px; text-align: left; font-weight: bold;">Display&nbsp;Name</th></tr>';
+            let html = '<table class="parameters-table">';
+            html += '<tr class="parameters-table-header-row"><th class="parameters-table-heading">Name</th><th class="parameters-table-heading">Type</th><th class="parameters-table-heading">Display&nbsp;Name</th><th class="parameters-table-heading">Fixed&nbsp;Value</th></tr>';
+            let rowCount = 0;
 
             for (const [key, param] of Object.entries(nodeData.parameters)) {
-                if (typeof param === 'object' && param.UIname) {
-                    const uiName = param.UIname || key;
+                if (typeof param === 'object' && (param.UIname || param.UIName || param.name)) {
+                    const uiName = getParameterUiName(param, key);
                     const paramType = param.type || '?';
                     const iconHtml = getIconHtml(paramType);
-                    html += `<tr style="border-bottom: 1px solid #eee;">
-                        <td style="padding: 5px;">${uiName}</td>
-                        <td style="padding: 5px;">${iconHtml}</td>
-                        <td style="padding: 5px;"><input type="text" class="param-display-name" value="" placeholder="Display name" style="width:100%;" /></td>
+                    html += `<tr class="parameters-table-row">
+                        <td class="parameters-table-cell">${uiName}</td>
+                        <td class="parameters-table-cell">${iconHtml}</td>
+                        <td class="parameters-table-cell"><input type="text" class="param-display-name" data-parameter-key="${key}" value="" placeholder="Display name" /></td>
+                        <td class="parameters-table-cell"><input type="text" class="param-fixed-value" data-parameter-key="${key}" value="" placeholder="Fixed value" /></td>
                     </tr>`;
+                    rowCount += 1;
                 }
             }
+
+            if (rowCount === 0) {
+                parametersContainer.innerHTML = '<p class="empty-state-text">No parameters available</p>';
+                return;
+            }
+
             html += '</table>';
             // add set button below table
-            html += '<button class="set-button">Set</button>';
+            html += '<div class="metadata-parameters-actions"><span id="nodeParametersStatus" class="metadata-parameters-status"></span><button type="button" id="nodeParametersSetButton" class="set-button">Set</button></div>';
             parametersContainer.innerHTML = html;
+
+            const setButton = document.getElementById('nodeParametersSetButton');
+            if (setButton) {
+                setButton.addEventListener('click', saveNodeParameters);
+            }
         }
+
+        // Draggable resize handle between main area and bottom bar
+        (function () {
+            const handle = document.getElementById('resizeHandle');
+            const HANDLE_PX = 6;
+            const MIN_BOTTOM = 60;
+            const MIN_TOP = 80;
+            let dragging = false;
+            let startY = 0;
+            let startBottomPx = 0;
+
+            handle.addEventListener('mousedown', function (e) {
+                dragging = true;
+                startY = e.clientY;
+                // measure the current bottom-bar pixel height
+                startBottomPx = document.getElementById('bottomBar').getBoundingClientRect().height;
+                handle.classList.add('dragging');
+                document.body.style.cursor = 'ns-resize';
+                document.body.style.userSelect = 'none';
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', function (e) {
+                if (!dragging) return;
+                // dragging UP  (e.clientY < startY) → delta > 0 → bottom panel grows
+                // dragging DOWN (e.clientY > startY) → delta < 0 → bottom panel shrinks
+                const delta = startY - e.clientY;
+                const totalHeight = window.innerHeight;
+                let newBottomPx = startBottomPx + delta;
+                newBottomPx = Math.max(MIN_BOTTOM, newBottomPx);
+                newBottomPx = Math.min(newBottomPx, totalHeight - HANDLE_PX - MIN_TOP);
+                document.body.style.gridTemplateRows = `1fr ${HANDLE_PX}px ${newBottomPx}px`;
+                if (typeof cy !== 'undefined') cy.resize();
+            });
+
+            document.addEventListener('mouseup', function () {
+                if (!dragging) return;
+                dragging = false;
+                handle.classList.remove('dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            });
+        })();
+
+        ensureIconsLoaded();
 
         // Toggle connection mode
         connectionModeBtn.addEventListener('click', function () {
