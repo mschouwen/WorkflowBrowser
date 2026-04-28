@@ -83,6 +83,62 @@ def get_icon(datatype):
     # Otherwise return a single icon string
     return icons.get(datatype, icons['unknown'])
 
+
+def normalize_parameter_direction(value):
+    normalized = str(value or '').strip().lower()
+
+    if normalized in ('yes', 'true', '1', 'in', 'input'):
+        return 'input'
+
+    if normalized in ('no', 'false', '0', 'out', 'output'):
+        return 'output'
+
+    return 'unknown'
+
+
+def extract_sidebar_label(operation):
+    if not isinstance(operation, dict):
+        return ''
+
+    syntax_value = operation.get('syntax')
+    if syntax_value not in (None, ''):
+        return str(syntax_value)
+
+    parameters = operation.get('parameters', {})
+    if not isinstance(parameters, dict):
+        return ''
+
+    syntax_param = parameters.get('syntax')
+    if isinstance(syntax_param, dict):
+        for key in ('value', 'default', 'name', 'UIname', 'UIName'):
+            if syntax_param.get(key) not in (None, ''):
+                return str(syntax_param.get(key))
+    elif syntax_param not in (None, ''):
+        return str(syntax_param)
+
+    return ''
+
+
+def build_sidebar_item(operation):
+    if not isinstance(operation, dict):
+        return None
+
+    operation_id = operation.get('id')
+    name = operation.get('name')
+
+    if operation_id in (None, '') or not name:
+        return None
+
+    label = extract_sidebar_label(operation)
+    if not label:
+        label = str(name)
+
+    return {
+        'id': str(operation_id),
+        'name': str(name),
+        'label': label
+    }
+
                 
 app = Flask(__name__, template_folder='.', static_folder='.', static_url_path='')
 app.secret_key = 'your-secret-key-change-this'  # Change this to a secure secret key
@@ -106,8 +162,34 @@ api.add_resource(DataResource, '/api/data')
 @app.route('/api/sidebar', methods=['GET'])
 def get_sidebar_items():
     """Endpoint to return sidebar items"""
-    items = ilwis.operations("unique")
-    return jsonify({'items': items})
+    items = ilwis.operationMetaData("*")
+    sidebar_items = []
+
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except json.JSONDecodeError as e:
+            print(e)
+            items = []
+
+    if isinstance(items, dict):
+        items = list(items.values())
+
+    if isinstance(items, (list, tuple)):
+        for item in items:
+            parsed_item = item
+            if isinstance(item, str):
+                try:
+                    parsed_item = json.loads(item)
+                except json.JSONDecodeError:
+                    continue
+
+            sidebar_item = build_sidebar_item(parsed_item)
+            if sidebar_item:
+                sidebar_items.append(sidebar_item)
+
+    sidebar_items.sort(key=lambda value: value['label'].lower())
+    return jsonify({'items': sidebar_items})
 
 
 @app.route('/api/icons', methods=['GET'])
@@ -153,6 +235,25 @@ def set_metadata_parameters():
     })
 
 
+@app.route('/api/workflow-metadata', methods=['GET'])
+def get_workflow_metadata():
+    requested_workflow_id = request.args.get('workflow_id', workflow_id)
+
+    if requested_workflow_id in (None, '', -1, '-1'):
+        return jsonify({'status': 'error', 'message': 'Invalid workflow id'}), 400
+
+    workflow_key = str(requested_workflow_id)
+    metadata = get_metadata(workflow_key)
+    parameter_values = workflow_parameter_values.get(workflow_key, {})
+
+    return jsonify({
+        'status': 'success',
+        'workflow_id': requested_workflow_id,
+        'metadata': metadata,
+        'parameter_values': parameter_values
+    })
+
+
 @app.route('/api/node-parameters', methods=['POST'])
 def set_node_parameters():
     data = request.get_json() or {}
@@ -169,7 +270,10 @@ def set_node_parameters():
 
     if not isinstance(values, dict):
         return jsonify({'status': 'error', 'message': 'Node parameters must be an object'}), 400
-
+    # temporary location, should be set based on user name and configuration
+    ilwis.setWorkingCatalog('file:///home/mschouwen/data/ilwisdata')
+    ilwis.updateWorkflow(json.dumps(data))
+    
     normalized_values = {}
     for key, value in values.items():
         key_str = str(key)
@@ -223,7 +327,7 @@ def generate_node_table():
 @app.route('/api/drop', methods=['POST'])
 def handle_drop():
     data = request.get_json()
-    item = data.get('itemNumber')  # Support both 'itemNumber' and 'item' keys
+    item = data.get('itemNumber') or data.get('item')  # Support both operation id and fallback item keys
     md = get_metadata(item)
     position = data.get('position')
     
